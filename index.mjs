@@ -46,24 +46,48 @@ function jsonResponse(statusCode, data, traceId) {
 }
 
 // ─── Auto-compute fields from incidentType ───────────────────────────────────
-function computeFields(incidentType, centerPoint) {
+function getRadiusBySeverity(severity) {
+  const map = {
+    LOW: 1,
+    MEDIUM: 3,
+    HIGH: 5,
+    CRITICAL: 10,
+  };
+
+  return map[severity] ?? 3;
+}
+
+function kmToLatLngDelta(lat, km) {
+  const latDelta = km / 111;
+  const lngDelta = km / (111 * Math.cos((lat * Math.PI) / 180));
+
+  return { latDelta, lngDelta };
+}
+
+function computeFields(incidentType, centerPoint, incidentSeverity) {
   const { lat, lng } = centerPoint;
-  const delta = 0.04;
 
   const sevMap = { flood: "HIGH", fire: "CRITICAL", earthquake: "MEDIUM" };
   const popMap = { flood: 2800, fire: 5100, earthquake: 1600 };
 
-  const severityLevel = sevMap[incidentType] ?? "MEDIUM";
+  const severityLevel =
+    incidentSeverity?.toUpperCase() ??
+    sevMap[incidentType] ??
+    "MEDIUM";
+
+  const radiusKm = getRadiusBySeverity(severityLevel);
+  const { latDelta, lngDelta } = kmToLatLngDelta(lat, radiusKm);
+
   const estimatedAffectedPopulation = popMap[incidentType] ?? 1000;
   const evacuationRequired = ["CRITICAL", "HIGH"].includes(severityLevel);
 
   const affectedArea = {
     type: "Polygon",
     coordinates: [[
-      [lng - delta, lat - delta],
-      [lng + delta, lat - delta],
-      [lng + delta, lat + delta],
-      [lng - delta, lat + delta],
+      [lng - lngDelta, lat - latDelta],
+      [lng + lngDelta, lat - latDelta],
+      [lng + lngDelta, lat + latDelta],
+      [lng - lngDelta, lat + latDelta],
     ]],
   };
 
@@ -72,6 +96,7 @@ function computeFields(incidentType, centerPoint) {
     estimatedAffectedPopulation,
     evacuationRequired,
     affectedArea,
+    radiusKm,
   };
 }
 
@@ -371,7 +396,8 @@ async function createZone(event, traceId) {
   const now = new Date().toISOString();
   const computed = computeFields(
     resolvedIncidentType,
-    resolvedCenterPoint
+    resolvedCenterPoint,
+    incidentDetails?.severity
   );
 
   if (overlap) {
@@ -609,27 +635,54 @@ async function fetchIncidentById(incidentId, traceId) {
   return data;
 }
 
+// ─── Helper: merge source incident ids ไม่ให้ซ้ำ ─────────────────────────────
+function mergeSourceIncidentIds(existingIds = [], newIncidentId) {
+  if (!newIncidentId) return existingIds;
+  return [...new Set([...existingIds, newIncidentId])];
+}
+
+// ─── Helper: เก็บ snapshot ของ incident reporter ───────────────────────────
+function buildIncidentReporterSnapshot(incident) {
+  return {
+    incidentId: incident.incident_id,
+    severity: incident.severity,
+    incidentStatus: incident.status,
+    addressName: incident.address_name,
+    affectedCount: incident.affected_count,
+    updatedAt: incident.updated_at,
+  };
+}
+
 async function handleIncidentStatusChanged(message, traceId) {
   console.log(`[${traceId}] handleIncidentStatusChanged called`);
   console.log(`[${traceId}] SNS message:`, JSON.stringify(message));
 
   const incidentId = message.incident_id ?? message.incidentId;
   const newStatus = (
-                    message.new_status ??
-                    message.newStatus ??
-                    message.status ??
-                    ""
-    ).toUpperCase();
+    message.new_status ??
+    message.newStatus ??
+    message.status ??
+    ""
+  ).toUpperCase();
 
   if (!incidentId) {
     console.warn(`[${traceId}] Missing incidentId in SNS message`);
     return { ignored: true, reason: "missing incidentId" };
   }
 
-  if (newStatus !== "VERIFIED") {
-    console.log(`[${traceId}] Ignore status ${newStatus}`);
-    return { ignored: true, reason: `status ${newStatus}` };
-  }
+  const updateStatusMap = {
+  IN_PROGRESS: "CONTAINED",
+  RESOLVED: "RESOLVED",
+  CLOSED: "ARCHIVED",
+};
+
+const isCreate = newStatus === "VERIFIED";
+const mappedStatus = updateStatusMap[newStatus];
+
+if (!isCreate && !mappedStatus) {
+  console.log(`[${traceId}] Ignore status ${newStatus}`);
+  return { ignored: true, reason: `status ${newStatus}` };
+}
 
   const incident = await fetchIncidentById(incidentId, traceId);
 
@@ -654,8 +707,20 @@ async function handleIncidentStatusChanged(message, traceId) {
   const reportedTime = incident.created_at ?? new Date().toISOString();
 
   const overlap = await findOverlappingZone(centerPoint.lat, centerPoint.lng, traceId);
+
+  if (!overlap && !isCreate) {
+  console.log(`[${traceId}] No existing zone for update status ${newStatus}`);
+  return { ignored: true, reason: "zone not found for update" };
+}
+
   const now = new Date().toISOString();
-  const computed = computeFields(incidentType, centerPoint);
+  const computed = computeFields(
+  incidentType,
+  centerPoint,
+  incident.severity
+);
+
+  const snapshot = buildIncidentReporterSnapshot(incident);
 
   if (overlap) {
     const SEV = ["LOW", "MEDIUM", "HIGH", "CRITICAL"];
@@ -671,19 +736,17 @@ async function handleIncidentStatusChanged(message, traceId) {
       ...overlap,
       incidentType,
       centerPoint,
-      severityLevel: maxSev,
-      evacuationRequired: ["CRITICAL", "HIGH"].includes(maxSev),
+      ...computed,
       reportedTime,
       lastUpdated: now,
-      sourceIncidentId: incident.incident_id,
-      incidentReporterSnapshot: {
-        incidentId: incident.incident_id,
-        severity: incident.severity,
-        incidentStatus: incident.status,
-        addressName: incident.address_name,
-        affectedCount: incident.affected_count,
-        updatedAt: incident.updated_at,
-      },
+      status: isCreate ? "ACTIVE" : mappedStatus,
+
+      sourceIncidentIds: mergeSourceIncidentIds(
+        overlap.sourceIncidentIds,
+        incident.incident_id
+      ),
+
+      incidentReporterSnapshot: snapshot,
     };
 
     await client.send(new PutCommand({ TableName: TABLE, Item: merged }));
@@ -698,15 +761,9 @@ async function handleIncidentStatusChanged(message, traceId) {
     lastUpdated: now,
     status: "ACTIVE",
     ...computed,
-    sourceIncidentId: incident.incident_id,
-    incidentReporterSnapshot: {
-      incidentId: incident.incident_id,
-      severity: incident.severity,
-      incidentStatus: incident.status,
-      addressName: incident.address_name,
-      affectedCount: incident.affected_count,
-      updatedAt: incident.updated_at,
-    },
+
+    sourceIncidentIds: incident.incident_id ? [incident.incident_id] : [],
+    incidentReporterSnapshot: snapshot,
   };
 
   await client.send(new PutCommand({ TableName: TABLE, Item: newZone }));
