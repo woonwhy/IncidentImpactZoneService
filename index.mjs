@@ -8,10 +8,14 @@ import {
   ScanCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { randomUUID } from "crypto";
+import { SNSClient, PublishCommand } from "@aws-sdk/client-sns";
 
 const client = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const TABLE = "ImpactZones";
 const INDEX = "status-severity-index";
+
+const sns = new SNSClient({ region: "us-east-1" });
+const TOPIC_ARN = process.env.IMPACT_ZONE_TOPIC_ARN;
 
 // ─── External Service URLs ────────────────────────────────────────────────────
 const INCIDENT_REPORTER_URL =
@@ -413,6 +417,7 @@ async function createZone(event, traceId) {
       TableName: TABLE,
       Item: merged,
     }));
+    await publishImpactZoneEvent(merged, "IMPACT_ZONE_UPDATED");
 
     return jsonResponse(201, merged, traceId);
   }
@@ -431,6 +436,7 @@ async function createZone(event, traceId) {
     TableName: TABLE,
     Item: newZone,
   }));
+  await publishImpactZoneEvent(newZone, "IMPACT_ZONE_CREATED");
 
   return jsonResponse(201, newZone, traceId);
 }
@@ -537,6 +543,9 @@ async function updateSeverity(event, traceId) {
       ReturnValues: "ALL_NEW",
     })
   );
+
+  const updatedZone = updated.Attributes;
+  await publishImpactZoneEvent(updatedZone, "IMPACT_ZONE_UPDATED");
 
   return jsonResponse(
     200,
@@ -750,6 +759,7 @@ if (!isCreate && !mappedStatus) {
     };
 
     await client.send(new PutCommand({ TableName: TABLE, Item: merged }));
+    await publishImpactZoneEvent(merged, "IMPACT_ZONE_UPDATED");
     return { created: false, merged: true, zoneId: merged.id };
   }
 
@@ -767,7 +777,38 @@ if (!isCreate && !mappedStatus) {
   };
 
   await client.send(new PutCommand({ TableName: TABLE, Item: newZone }));
+  await publishImpactZoneEvent(newZone, "IMPACT_ZONE_CREATED");
   return { created: true, merged: false, zoneId: newZone.id };
+}
+
+// ════════════════════════════════════════════════════════
+// SNS Publisher
+// ════════════════════════════════════════════════════════
+
+async function publishImpactZoneEvent(zone, eventType = "IMPACT_ZONE_UPDATED") {
+  const payload = {
+    eventType,
+    zoneId: zone.id,
+    status: zone.status,
+    severityLevel: zone.severityLevel,
+    radiusKm: zone.radiusKm,
+    sourceIncidentIds: zone.sourceIncidentIds,
+    centerPoint: zone.centerPoint,
+    lastUpdated: zone.lastUpdated,
+  };
+
+  const command = new PublishCommand({
+    TopicArn: TOPIC_ARN,
+    Message: JSON.stringify(payload),
+    MessageAttributes: {
+      eventType: {
+        DataType: "String",
+        StringValue: eventType,
+      },
+    },
+  });
+
+  await sns.send(command);
 }
 
 // ════════════════════════════════════════════════════════
