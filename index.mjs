@@ -105,7 +105,7 @@ function computeFields(incidentType, centerPoint, incidentSeverity) {
 }
 
 // ─── Overlap detection ────────────────────────────────────────────────────────
-async function findOverlappingZone(lat, lng, traceId) {
+async function findOverlappingZone(lat, lng, incidentId, traceId) {
   console.log(`[${traceId}] findOverlappingZone called`);
 
   const res = await client.send(
@@ -113,20 +113,24 @@ async function findOverlappingZone(lat, lng, traceId) {
       TableName: TABLE,
       IndexName: INDEX,
       KeyConditionExpression: "#s = :active",
-      ExpressionAttributeNames: { "#s": "status" },
-      ExpressionAttributeValues: { ":active": "ACTIVE" },
+      ExpressionAttributeNames: {
+        "#s": "status",
+      },
+      ExpressionAttributeValues: {
+        ":active": "ACTIVE",
+      },
     })
   );
 
   const found =
     (res.Items ?? []).find((z) => {
-      const dLat = Math.abs(z.centerPoint.lat - lat);
-      const dLng = Math.abs(z.centerPoint.lng - lng);
-      return dLat < 0.12 && dLng < 0.12;
+      return z.sourceIncidentIds?.includes(incidentId);
     }) ?? null;
 
   console.log(
-    `[${traceId}] findOverlappingZone result: ${found ? found.id : "none"}`
+    `[${traceId}] findOverlappingZone result: ${
+      found ? found.id : "none"
+    }`
   );
 
   return found;
@@ -394,6 +398,7 @@ async function createZone(event, traceId) {
   const overlap = await findOverlappingZone(
     resolvedCenterPoint.lat,
     resolvedCenterPoint.lng,
+    incident.incident_id,
     traceId
   );
 
@@ -668,11 +673,13 @@ async function handleIncidentStatusChanged(message, traceId) {
 
   const incidentId = message.incident_id ?? message.incidentId;
   const newStatus = (
-    message.new_status ??
-    message.newStatus ??
-    message.status ??
-    ""
-  ).toUpperCase();
+  message.new_status ??
+  message.newStatus ??
+  message.status ??
+  message.currentStatus ??
+  message.current_status ??
+  ""
+).toUpperCase();
 
   if (!incidentId) {
     console.warn(`[${traceId}] Missing incidentId in SNS message`);
