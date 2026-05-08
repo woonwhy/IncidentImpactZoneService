@@ -10,7 +10,13 @@ import {
 import { randomUUID } from "crypto";
 import { SNSClient, PublishCommand } from "@aws-sdk/client-sns";
 
-const client = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const client = DynamoDBDocumentClient.from(new DynamoDBClient({}),
+{
+  marshallOptions: {
+    removeUndefinedValues: true,
+  },
+}
+);
 const TABLE = "ImpactZones";
 const INDEX = "status-severity-index";
 
@@ -753,11 +759,11 @@ async function handleIncidentStatusChanged(message, traceId) {
 
   const snapshot = {
     incidentId,
-    severity: message.severity,
-    incidentStatus: newStatus,
-    addressName: message.address_name ?? message.addressName,
-    affectedCount: message.affected_count ?? message.affectedCount,
-    updatedAt: message.updated_at ?? message.updatedAt,
+    severity: message.severity ?? null,
+    incidentStatus: newStatus ?? null,
+    addressName: message.address_name ?? message.addressName ?? null,
+    affectedCount: message.affected_count ?? message.affectedCount ?? null,
+    updatedAt: message.updated_at ?? message.updatedAt ?? null,
   };
 
   if (overlap) {
