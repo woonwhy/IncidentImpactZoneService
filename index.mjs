@@ -328,6 +328,8 @@ async function getAllZones(event, traceId) {
 
   const rawSeverity = event.queryStringParameters?.severityLevel;
   const severityLevel = rawSeverity ? rawSeverity.toUpperCase() : undefined;
+  const rawStatus = event.queryStringParameters?.status;
+  const status = rawStatus ? rawStatus.toUpperCase() : undefined;
 
   const validSev = ["CRITICAL", "HIGH", "MEDIUM", "LOW"];
   if (severityLevel && !validSev.includes(severityLevel)) {
@@ -341,19 +343,36 @@ async function getAllZones(event, traceId) {
     );
   }
 
-  const res = await client.send(
-    new ScanCommand({
-      TableName: TABLE,
-      ...(severityLevel
-        ? {
-            FilterExpression: "severityLevel = :sev",
-            ExpressionAttributeValues: {
-              ":sev": severityLevel,
-            },
-          }
-        : {}),
-    })
-  );
+  const filterExpressions = [];
+const expressionAttributeValues = {};
+
+if (severityLevel) {
+  filterExpressions.push("severityLevel = :sev");
+  expressionAttributeValues[":sev"] = severityLevel;
+}
+
+if (status) {
+  filterExpressions.push("#st = :status");
+  expressionAttributeValues[":status"] = status;
+}
+
+const res = await client.send(
+  new ScanCommand({
+    TableName: TABLE,
+
+    ...(filterExpressions.length > 0
+      ? {
+          FilterExpression: filterExpressions.join(" AND "),
+
+          ExpressionAttributeNames: {
+            "#st": "status",
+          },
+
+          ExpressionAttributeValues: expressionAttributeValues,
+        }
+      : {}),
+  })
+);
 
   return jsonResponse(200, { items: res.Items ?? [] }, traceId);
 }
