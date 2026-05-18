@@ -327,56 +327,72 @@ async function getAllZones(event, traceId) {
   console.log(`[${traceId}] getAllZones called`);
 
   const rawSeverity = event.queryStringParameters?.severityLevel;
-  const severityLevel = rawSeverity ? rawSeverity.toUpperCase() : undefined;
+  const severityLevel = rawSeverity
+    ? rawSeverity.toUpperCase()
+    : undefined;
+
   const rawStatus = event.queryStringParameters?.status;
-  const status = rawStatus ? rawStatus.toUpperCase() : undefined;
+  const status = rawStatus
+    ? rawStatus.toUpperCase()
+    : undefined;
 
   const validSev = ["CRITICAL", "HIGH", "MEDIUM", "LOW"];
+
   if (severityLevel && !validSev.includes(severityLevel)) {
     return jsonResponse(
       400,
       {
         error: "Bad Request",
-        message: "severityLevel ต้องเป็น CRITICAL | HIGH | MEDIUM | LOW",
+        message:
+          "severityLevel ต้องเป็น CRITICAL | HIGH | MEDIUM | LOW",
       },
       traceId
     );
   }
 
   const filterExpressions = [];
-const expressionAttributeValues = {};
+  const expressionAttributeValues = {};
+  const expressionAttributeNames = {};
 
-if (severityLevel) {
-  filterExpressions.push("severityLevel = :sev");
-  expressionAttributeValues[":sev"] = severityLevel;
-}
+  if (severityLevel) {
+    filterExpressions.push("severityLevel = :sev");
+    expressionAttributeValues[":sev"] = severityLevel;
+  }
 
-if (status) {
-  filterExpressions.push("#st = :status");
-  expressionAttributeValues[":status"] = status;
-}
+  if (status) {
+    filterExpressions.push("#st = :status");
 
-const res = await client.send(
-  new ScanCommand({
+    expressionAttributeNames["#st"] = "status";
+    expressionAttributeValues[":status"] = status;
+  }
+
+  const params = {
     TableName: TABLE,
+  };
 
-    ...(filterExpressions.length > 0
-      ? {
-          FilterExpression: filterExpressions.join(" AND "),
+  if (filterExpressions.length > 0) {
+    params.FilterExpression =
+      filterExpressions.join(" AND ");
 
-          ExpressionAttributeNames: {
-            "#st": "status",
-          },
+    params.ExpressionAttributeValues =
+      expressionAttributeValues;
 
-          ExpressionAttributeValues: expressionAttributeValues,
-        }
-      : {}),
-  })
-);
+    if (Object.keys(expressionAttributeNames).length > 0) {
+      params.ExpressionAttributeNames =
+        expressionAttributeNames;
+    }
+  }
 
-  return jsonResponse(200, { items: res.Items ?? [] }, traceId);
+  const res = await client.send(
+    new ScanCommand(params)
+  );
+
+  return jsonResponse(
+    200,
+    { items: res.Items ?? [] },
+    traceId
+  );
 }
-
 // ════════════════════════════════════════════════════════
 // API 2 — Create GET /impact-zones
 // ════════════════════════════════════════════════════════
